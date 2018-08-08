@@ -1,0 +1,15 @@
+##### tftest.sub ###################
+#! /bin/bash
+#$ -S /bin/bash
+#$ -q std.q
+#$ -cwd
+#$ -N testtime_eachteam_naive.py
+#$ -j y
+#$ -o testtime_eachteam_naive.qlog
+#$ -l mem_free=16G
+#$ -pe smp 2
+#$ -V
+start_time=$SECONDS
+python testtime_eachteam_naive.py
+runtime=$(echo $SECONDS - $start_time | bc )
+echo "Total elapse time is $runtime"
