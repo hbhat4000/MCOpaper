@@ -97,6 +97,9 @@ def trainDTMC(dsts, N=0):
     return transmat, deadendstates
 
 # ctmc training (raw MLE)
+# as written in 2017, the function accommodates:
+# - a single discrete state time series "dsts" and
+# - a single sequences of times "timeseq"
 def trainCTMC(dsts, timeseq, N):
     transratemat = counttrans(dsts, N)
     for i in range(N):
@@ -110,6 +113,43 @@ def trainCTMC(dsts, timeseq, N):
     # and then set diagonal entry
     transratemat = 1.0*transratemat
     sttally = statetimetally(dsts, timeseq, N)
+    for i in range(N):
+        if np.sum(transratemat[i,:]) != 0:
+            transratemat[i,] /= sttally[i]
+            rowsum = np.sum(transratemat[i,])
+            transratemat[i, i] = -rowsum
+    return transratemat, deadendstates
+
+# now in 2018, we would like the function to accommodate multiple
+# sequences of states and times
+def trainCTMCm(dsts, timeseq, N):
+    # make sure we have the same number of each
+    l1 = len(dsts)
+    l2 = len(timeseq)
+    assert l1 == l2
+
+    # initialize the transition rate matrix to be all zeros
+    # initialize the amount of time spent in each state to be all zero 
+    transratemat = np.zeros((N,N))
+    sttally = np.zeros(N)
+
+    # count the number of transitions in each discrete state time series
+    # also, aggregate all times spent in all states
+    for tsnum in range(l1):
+        transratemat += counttrans(dsts[tsnum], N)
+        sttally += statetimetally(dsts[tsnum], timeseq[tsnum], N)
+        
+    # check diagonal counts are zero
+    for i in range(N):
+        assert transratemat[i, i] == 0
+
+    # catalog all dead-end states
+    deadendstates = []
+    for i in range(transratemat.shape[0]):
+        if np.sum(transratemat[i,:]) == 0:
+            deadendstates.append(i)
+
+    # now form the actual transition rate matrix from computed ingredients
     for i in range(N):
         if np.sum(transratemat[i,:]) != 0:
             transratemat[i,] /= sttally[i]
