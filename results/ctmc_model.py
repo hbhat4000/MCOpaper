@@ -1,77 +1,83 @@
-from mcoLH import *
+import numpy as np
+import mcoLH as mco
 import pandas as pd
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+# import matplotlib
+# matplotlib.use('Agg')
+# import matplotlib.pyplot as plt
 
-# Specify the states
-states = [2**x for x in range(2,9)]
+# specify the states
+states = [2**x for x in range(10,11)]
+lstates = len(states)
 
-# number of states
-r = len(states)
+# keep track of how many simulations 
+numberofsims = np.zeros(lstates)
 
-# training size
-L = 1000
-#L = 1000
-# test size 
-T = 3*L
+# training and test size, i.e., length of time series to request from sampler
+L = 100
 
-# number of simulation
-N = 1000
-naive_avgerr = []
-fixed_avgerr = []
-constviol = []
-sparsity_ratio = []
-numsim = np.zeros(r)
-k = 0
-for i in states:
-    naive_vec = np.zeros(N)
-    fixed_vec = np.zeros(N)
-    constr_vec = np.zeros(N)
-    sparse_vec = np.zeros(N)
-    for j in range(N):
-        M, _ =createrandomCTMC(i-1,broken=False)
-        ts, tseq = sampleCTMC(M,L,1)
-        ts_test, tseq_test = sampleCTMC(M,T,1)
-        ts[L] = i-1
-        ts_test[T] = i - 1
-        LTerr_training, LTerr_test,_,STerr,_ = test_naiveCTMC(ts,tseq,ts_test,tseq_test)
-        LTerr_training_fixed, LTerr_test_fixed,_,STerr_fixed, constrviol,_,_,sparsity= test_fixedCTMC(ts,tseq,ts_test,tseq_test)
-        naive_vec[j] = STerr
-        fixed_vec[j] = STerr_fixed
-        constr_vec[j] = constrviol
-        sparse_vec[j] = sparsity
-    naive_avgerr.append(np.cumsum(naive_vec)/np.arange(1,N+1))   
-    fixed_avgerr.append(np.cumsum(fixed_vec)/np.arange(1,N+1))
-    #plt.scatter(np.arange(1,N+1),naive_avgerr,c='blue')
-    #plt.axhline(np.mean(naive_vec))
-    #plt.savefig('%dstates_naive.eps'%i)
-    avg_fixed_diff = np.abs(fixed_avgerr - np.mean(fixed_vec))
-    avg_naive_diff = np.abs(naive_avgerr - np.mean(naive_vec))
-    constviol.append(np.cumsum(constr_vec)/np.arange(1,N+1))
-    sparsity_ratio.append(np.cumsum(sparse_vec)/np.arange(1,N+1))
-    numsim[k] = np.where(avg_fixed_diff < 0.001)[0][-1] 
-    #numsim_naive = np.where(avg_naive_diff < 0.01)[0][-1]       
-    k += 1
-print(numsim)
-#print(naive_avgerr)
-#print(fixed_avgerr)
-#ind = np.array([50,250,500,1000])
+# number of series to generate
+ns = 500
 
-#ind = np.array([10,20,30])
-ind = np.array([50,250,500,1000]) 
-ind1 = ind - 1 
-err = np.zeros((r,len(ind)))
-err_fixed = err.copy()
-for i in range(r):
-    err[i,] = naive_avgerr[i][ind1]
-    err_fixed[i,] = fixed_avgerr[i][ind1]
-dat = pd.DataFrame(err,index=states,columns=ind)
-dat = dat.rename_axis('# of states').rename_axis('CTMC simulation',axis='columns')
-dat_fixed = pd.DataFrame(err_fixed,index=states,columns=ind)
-dat_fixed = dat_fixed.rename_axis('# of states').rename_axis('CTMC simulation',axis='columns')
-print(dat.to_latex(column_format='lcccc'))
-print(dat_fixed.to_latex(column_format='lcccc'))
+# number of simulations, i.e., how many times we repeat the whole process
+N = 10
 
+# initialize all the arrays used to store results
+LTerrN_train = np.zeros((lstates, N))
+LTerrN_test = np.zeros((lstates, N))
+STerrN = np.zeros((lstates, N))
+traintimeN = np.zeros((lstates, N))
+LTerrF_train = np.zeros((lstates, N))
+LTerrF_test = np.zeros((lstates, N))
+STerrF = np.zeros((lstates, N))
+traintimeF = np.zeros((lstates, N))
+solFound = np.zeros((lstates, N))
+constrviol = np.zeros((lstates, N))
+nnz = np.zeros((lstates, N))
+epsnorms = np.zeros((lstates, 3, N))
+
+for whichstate in range(lstates):
+    for simctr in range(N):
+        print((whichstate,states[whichstate],simctr))
+        M, w, lastrow = mco.createrandomCTMC(states[whichstate])
+        ts = [[]]*ns
+        tseq = [[]]*ns
+        ts_test = [[]]*ns
+        tseq_test = [[]]*ns
+        for nsnum in range(ns):
+            ts[nsnum], tseq[nsnum] = mco.sampleCTMC(M,L,0)
+            ts_test[nsnum], tseq_test[nsnum] = mco.sampleCTMC(M,L,0)
+         
+        # naive test block
+        o1, o2, o3, o4 = mco.test_CTMC(ts,tseq,ts_test,tseq_test)
+        LTerrN_train[whichstate, simctr] = o1
+        LTerrN_test[whichstate, simctr] = o2
+        STerrN[whichstate, simctr] = o3
+        traintimeN[whichstate, simctr] = o4
+
+        # fixed test block
+        o1, o2, o3, o4, o5 = mco.test_CTMC(ts,tseq,ts_test,tseq_test,wantFixed=True)
+        LTerrF_train[whichstate, simctr] = o1
+        LTerrF_test[whichstate, simctr] = o2
+        STerrF[whichstate, simctr] = o3
+        traintimeF[whichstate, simctr] = o4
+        solFound[whichstate, simctr] = o5[0]
+        constrviol[whichstate, simctr] = o5[1]
+        nnz[whichstate, simctr] = o5[2]
+        epsnorms[whichstate, :, simctr] = np.array(o5[3])
+         
+
+outname = "ctmcresultsPT3.npz"
+np.savez(outname, LTerrN_train = LTerrN_train,
+                   LTerrN_test = LTerrN_test,
+                        STerrN = STerrN,
+                    traintimeN = traintimeN,
+                  LTerrF_train = LTerrF_train,
+                   LTerrF_test = LTerrF_test,
+                        STerrF = STerrF,
+                    traintimeF = traintimeF,
+                      solFound = solFound,
+                    constrviol = constrviol,
+                           nnz = nnz,
+                      epsnorms = epsnorms)
 
 

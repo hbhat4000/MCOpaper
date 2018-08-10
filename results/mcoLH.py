@@ -1,5 +1,6 @@
 import numpy as np
 import scipy.linalg
+import scipy.sparse.linalg
 import scipy.interpolate
 import cvxopt
 import mosek
@@ -65,6 +66,20 @@ def statetimetally(dsts, timeseq, N):
     for i in range(numts-1):
         sttally[dsts[i]] += diffseq[i]
     return sttally
+
+# multiple time series version of statetimetally
+def statetimetallym(dsts, timeseq, N):
+    # make sure we have the same number of each
+    l1 = len(dsts)
+    l2 = len(timeseq)
+    assert l1 == l2
+
+    sttally = np.zeros(N)
+    for tsnum in range(l1):
+        sttally += statetimetally(dsts[tsnum], timeseq[tsnum], N)
+
+    return sttally
+
 
 # just like statetimetally except that instead of summing the total time
 # spent in state i, we create a list of all the times spent in state i
@@ -155,7 +170,24 @@ def trainCTMCm(dsts, timeseq, N):
             transratemat[i,] /= sttally[i]
             rowsum = np.sum(transratemat[i,])
             transratemat[i, i] = -rowsum
-    return transratemat, deadendstates
+
+    return transratemat, deadendstates, sttally
+
+def newequilib(m, whichone):
+    if whichone == "DTMC":
+        eigval = 'LM'
+    elif whichone == "CTMC":
+        eigval = 'SM'
+    else:
+        raise ValueError('whichone must either be "DTMC" or "CTMC"')
+ 
+    try:
+        value, vector = scipy.sparse.linalg.eigs(m.T, k=1, which=eigval)
+        w = vector[:,0]/np.sum(vector[:,0])
+        return w
+    except scipy.sparse.linalg.ArpackNoConvergence:
+        return None
+
 
 # dtmc/ctmc equilibrium vector
 # we ***know*** the eigenvalue is either 1 or 0
@@ -381,10 +413,11 @@ def createrandomCTMC(n, broken=True):
     for i in range(n):
         transitions[i, i] = 0.0
     if broken:
+        lastrow = transitions[(n-1), :]
         transitions[(n-1), :] = 0.0
     M = createCTMC(transitions, w, n)
     w = w/np.sum(w)
-    return M, w
+    return M, w, lastrow
 
 def createrandomDTMC(n, broken=True):
     w = None
@@ -394,7 +427,7 @@ def createrandomDTMC(n, broken=True):
         transitions = np.reshape(np.random.randint(1, 501, n*n).astype(float), (n, n))
         for i in range(n):
             transitions[i, :] /= np.sum(transitions[i, :])
-        w = equilib(transitions, "DTMC")
+        w = newequilib(transitions, "DTMC")
         if w is not None:
             keepGoing = False
         #iternum += 1
@@ -585,7 +618,7 @@ def testnaiveDTMC(ts, m):
         prediction = sampleDTMC(phat, 1, ts[i-1])
         if prediction != ts[i]:
             STerrors[i-m] = 1
-        thisequilib = equilib(phat, "DTMC")
+        thisequilib = newequilib(phat, "DTMC")
         if thisequilib is None:
             LTerrors[i-m] = np.nan
         else:
@@ -625,7 +658,7 @@ def testfixedDTMC(ts, m):
         prediction = sampleDTMC(phat, 1, ts[i-1])
         if prediction != ts[i]:
             STerrors[i-m] = 1
-        thisequilib = equilib(phat, "DTMC")
+        thisequilib = newequilib(phat, "DTMC")
         if thisequilib is None:
             LTerrors[i-m] = np.nan
         else:
@@ -695,7 +728,7 @@ def testnaiveCTMC(ts, timeseq, m):
         if prediction != ts[i]:
             STerrors[i - m] = 1
  
-        """thisequilib = equilib(phat, "CTMC")
+        """thisequilib = newequilib(phat, "CTMC")
         if thisequilib is None:
             LTerrors[i - m] = np.nan
             print(phat)
@@ -790,7 +823,7 @@ def test_naiveDTMC(ts, ts_test, wantST = True):
 
     # compute LT training and test errors
     statefrac = (1.0*statefreq)/np.sum(statefreq)
-    pvec = equilib(phat, "DTMC", statefrac)
+    pvec = newequilib(phat, "DTMC", statefrac)
     train_errLT = np.sum(np.abs(pvec - statefrac))
     training_time = time.time()-start
     statefrac_test = (1.0*statefreq_test)/np.sum(statefreq_test)
@@ -848,7 +881,7 @@ def test_fixedDTMC(ts, ts_test, wantST = True):
     else:
         print("No Dead End States!")
         
-    pvec = equilib(phat, "DTMC", statefrac)
+    pvec = newequilib(phat, "DTMC", statefrac)
     if pvec is None:
         print(phat)
         trainLTerr = np.nan
@@ -882,46 +915,92 @@ def test_fixedDTMC(ts, ts_test, wantST = True):
         else:
             return trainLTerr, testLTerr, constrviol, training_time, sparsity
 
-#Test naive CTMC (new method)
-def test_naiveCTMC(ts, tseq, ts_test, tseq_test, wantST = True):
-    start = time.time()
-    numpredict = len(ts_test)
-    # prediction errors 
-    STerrors = np.zeros(numpredict-1, dtype='int32')
+# Test naive CTMC (new method, modified by HSB, 8/9/18)
+def test_CTMC(ts, tseq, ts_test, tseq_test, wantST = True, wantFixed = False):
+    ns = len(ts_test)
 
-    numstates = max(ts) + 1
-    
-    phat, des = trainCTMC(ts, tseq, numstates)
-    sttally = statetimetally(ts,tseq,numstates)
+    # compute number of states across all training series
+    numstates = 0
+    for nsnum in range(ns):
+        numstates = max(numstates, max(ts[nsnum]))
+
+    numstates += 1
+
+    # short-term prediction errors
+    STerrors = np.zeros(ns, dtype='int32')
+
+    # train naive model and compute time it takes to do so
+    start = time.time()
+    phat, des, sttally = trainCTMCm(ts, tseq, numstates)
+
+    # compute fraction of time spent in each state
     statefrac = (sttally) / np.sum(sttally)
+
+    if wantFixed:
+        solFound = True
+        eps, constrviol = fixCTMC(phat, statefrac, forcePos = True)
+        if eps is None:
+            solFound = False
+            nnz = None
+            epsnorms = None
+        else:
+            l = numstates * (numstates - 1) 
+            phat = addPert(phat, eps[0:l], numstates, 'CTMC')
+            nnz = np.sum(np.abs(np.ravel(eps[0:l])) > 2.2e-16)
+            myords = ['fro', np.Inf, 1]
+            epsnorms = [scipy.linalg.norm(eps,order) for order in myords]
+        fixedout = [solFound, constrviol, nnz, epsnorms]
+
+    training_time = time.time()-start
 
     # new way: explicitly compute the equilibrium vector \pi of phat
     #          and calculate || \pi - statefrac || in the L^1 norm
     pivec = equilib(phat, "CTMC")
+    if pivec is None:
+        pivec = newequilib(phat, "CTMC")
+
+    if pivec is None:
+        print(phat)
+        print(statefrac)
 
     # compute LT training and test errors
     LTerror_training = np.sum(np.abs(pivec - statefrac))
-    training_time = time.time()-start
-    sttally_test = statetimetally(ts_test,tseq_test,numstates)
-    statefrac_ts_test = sttally_test/ np.sum(sttally_test)
-    LTerror_test = np.sum(np.abs(pivec - statefrac_ts_test))
+    sttally_test = statetimetallym(ts_test, tseq_test, numstates)
+    statefrac_test = sttally_test/np.sum(sttally_test)
+    LTerror_test = np.sum(np.abs(pivec - statefrac_test))
 
     if wantST:
         # compute ST test error, i.e., "prediction"
-        for i in range(1,len(ts_test)):
-            prediction, _ = sampleCTMC(phat, 1, ts_test[i - 1])
-            if len(prediction) == 1:
-                STerrors[i-1] = 1
-            elif prediction[1] != ts_test[i]:
-                STerrors[i-1] = 1
+        ns = len(ts_test)
+        for nsnum in range(ns):
+            thislen = len(ts_test[nsnum])
+            theseSTerrors = np.zeros(thislen - 1)
+            for i in range(1,thislen):
+                prediction, _ = sampleCTMC(phat, 1, ts_test[nsnum][i - 1])
+                if len(prediction) == 1:
+                    theseSTerrors[i-1] = 1
+                elif prediction[1] != ts_test[nsnum][i]:
+                    theseSTerrors[i-1] = 1
+            STerrors[nsnum] = np.mean(theseSTerrors)
     
         ave_STerr = np.mean(STerrors)
-        return LTerror_training, LTerror_test, STerrors, ave_STerr, training_time
+        
+        if wantFixed:
+            return LTerror_training, LTerror_test, ave_STerr, training_time, fixedout 
+        else:
+            return LTerror_training, LTerror_test, ave_STerr, training_time
     else:
-        return LTerror_training, LTerror_test, training_time
+        if wantFixed:
+            return LTerror_training, LTerror_test, training_time, fixedout
+        else:
+            return LTerror_training, LTerror_test, training_time
 
-# Test fixed CTMC (new method)
+
+# Test fixed CTMC (new method, modified by HSB, 8/9/18)
 def test_fixedCTMC(ts, tseq, ts_test, tseq_test, wantST = True):
+    ns = len(ts_test)
+
+    
     start = time.time()
     numpredict = len(ts_test)
     # prediction errors 
@@ -946,7 +1025,7 @@ def test_fixedCTMC(ts, tseq, ts_test, tseq_test, wantST = True):
         print('No Dead End States!')
     
     # new way: see above
-    pivec = equilib(phat, "CTMC")
+    pivec = newequilib(phat, "CTMC")
 
     # compute LT training and test errors
     LTerror_training = np.sum(np.abs(pivec - statefrac))
@@ -989,7 +1068,7 @@ def bigstate_naiveCTMC(ts, tseq, ts_test,tseq_test):
 
     # new way: explicitly compute the equilibrium vector \pi of phat
     #          and calculate || \pi - statefrac || in the L^1 norm
-    pivec = equilib(phat, "CTMC")
+    pivec = newequilib(phat, "CTMC")
     #print("Naive pivec")
     #print(pivec)
     LTerror_training = np.sum(np.abs(pivec - statefrac))
@@ -1029,7 +1108,7 @@ def bigstate_fixedCTMC(ts, tseq, ts_test,tseq_test):
     # LTerror_training = np.sum(np.abs(np.dot(phat.T, statefrac)))
 
     # new way: see above
-    pivec = equilib(phat, "CTMC")
+    pivec = newequilib(phat, "CTMC")
     #print("Fixed pivec")
     #print(pivec)
     LTerror_training = np.sum(np.abs(pivec - statefrac))
